@@ -134,7 +134,7 @@ export interface AcpAdapterOptions {
    * probes, auxiliary purposes), in which case tool activity falls back to
    * `[tool: …]` reasoning notes.
    */
-  toolCallRecorder?: (() => AcpToolCallRecorder | undefined) | undefined
+  toolCallRecorder?: ((options: GenerateOptions) => AcpToolCallRecorder | undefined) | undefined
   /** Host sink for best-effort operation failures (session mode, etc.). */
   onWarn?: (message: string) => void
   /**
@@ -637,7 +637,7 @@ export class AcpAdapter extends LlmAdapter {
     let toolCallRecorder: AcpToolCallRecorder | undefined
     if (options.purpose === undefined) {
       try {
-        toolCallRecorder = this.config.toolCallRecorder?.()
+        toolCallRecorder = this.config.toolCallRecorder?.(options)
       } catch (error: unknown) {
         this.config.onWarn?.(`llm-acp: tool call recorder unavailable: ${error instanceof Error ? error.message : String(error)}`)
       }

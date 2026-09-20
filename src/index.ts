@@ -20,8 +20,8 @@ import type {} from '@deepseek-ai/dsh-agent'
 import type { ApprovalRequestId } from '@deepseek-ai/dsh-user-approval'
 import { MAX_TIMER_DELAY_MS } from '@deepseek-ai/dsh-timeout'
 import type {} from '@deepseek-ai/dsh-settings'
-import { createToolResultMessage, ToolCallId } from '@deepseek-ai/dsh-llm'
-import type { AdapterRegistrationHandle, DirectoryRegistrationHandle, LlmConfigurableProvider, LlmDiscoveredModel, LlmModelDiscoveryRequest } from '@deepseek-ai/dsh-llm'
+import { createAssistantMessage, createToolResultMessage, ToolCallId } from '@deepseek-ai/dsh-llm'
+import type { AdapterRegistrationHandle, AssistantProvenance, DirectoryRegistrationHandle, LlmConfigurableProvider, LlmDiscoveredModel, LlmModelDiscoveryRequest } from '@deepseek-ai/dsh-llm'
 import type { Session, SessionSeq } from '@deepseek-ai/dsh-session'
 import { AcpAdapter } from './adapter.ts'
 import type { AcpToolCallRecorder } from './adapter.ts'
@@ -436,7 +436,7 @@ function acpToolName(call: { name: string; toolKind: string }): string {
  *   recorder for the rest of the stream rather than failing the turn over a
  *   presentational record.
  */
-function acpToolCallRecorder(session: Session, onWarn: (message: string) => void): AcpToolCallRecorder | undefined {
+function acpToolCallRecorder(session: Session, source: AssistantProvenance, onWarn: (message: string) => void): AcpToolCallRecorder | undefined {
   const events = session.snapshotEvents()
   let boundary: { turn: number; step: number } | undefined
   for (let i = events.length - 1; i >= 0; i--) {
@@ -465,12 +465,23 @@ function acpToolCallRecorder(session: Session, onWarn: (message: string) => void
   return {
     callStarted(call) {
       guard('tool/call', () => {
+        const block = { type: 'tool-call' as const, id: ToolCallId(call.id), name: acpToolName(call), arguments: call.args }
+        const data = {
+          turn,
+          step,
+          message: createAssistantMessage({
+            content: [block],
+            source: { provider: source.provider, model: source.model },
+          }),
+          stream: [],
+        }
+        session.append('assistant/message', data, { surfaceOp: 'append' })
         const event = session.append('tool/call', {
           turn,
           step,
-          callId: ToolCallId(call.id),
-          name: acpToolName(call),
-          arguments: call.args,
+          callId: block.id,
+          name: block.name,
+          arguments: block.arguments,
         })
         callSeqs.set(call.id, event.seq)
       })
@@ -715,11 +726,11 @@ export function apply(ctx: Context, config: Config): void {
       // pairs (tool cards) when the stream runs inside a session step. Probes
       // and auxiliary calls get no session here and keep the `[tool: …]`
       // reasoning fallback.
-      toolCallRecorder: () => {
+      toolCallRecorder: (options) => {
         const agent = ctx.get('agents')?.currentInitiator()
         const session = agent?.session as Session | undefined
         if (session === undefined) return undefined
-        return acpToolCallRecorder(session, message => ctx.logger.warn(message))
+        return acpToolCallRecorder(session, options, message => ctx.logger.warn(message))
       },
       defaultModel: { id: resolved.defaultModelId, name: resolved.defaultModelName },
       enabledModels: server.models,

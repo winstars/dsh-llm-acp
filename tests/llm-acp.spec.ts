@@ -20,8 +20,9 @@ import { join } from 'node:path'
 import AgentRuntime, { type Agent } from '@deepseek-ai/dsh-agent'
 import { BlockAssembler, createUserMessage, type StreamChunk } from '@deepseek-ai/dsh-llm'
 import LlmRuntime from '@deepseek-ai/dsh-llm'
-import type { SessionEvent } from '@deepseek-ai/dsh-session'
-import type { SessionId } from '@deepseek-ai/dsh-session/types'
+import { Session, type SessionEvent } from '@deepseek-ai/dsh-session'
+import { SessionId } from '@deepseek-ai/dsh-session/types'
+import { toolPairingBalancedAfter, toolPairingBalancedBefore } from '../../deepseek-harness/packages/compaction/compaction/src/tool-pairing.ts'
 import ApprovalService, { type ApprovalOutcome } from '@deepseek-ai/dsh-user-approval'
 import * as acp from '../src/index.ts'
 import LocalSubprocessRuntime from '@deepseek-ai/dsh-subprocess-local'
@@ -1206,6 +1207,57 @@ describe('dsh-llm-acp', () => {
       const pending = resultBlock('tool-pending')
       expect(pending.message.content[0]!.isError).toBe(false)
       expect(pending.message.content[0]!.content).toEqual([])
+    } finally {
+      await ctx.fiber.dispose()
+    }
+  })
+
+  it.each(['MOCK_TOOLS', 'MOCK_SUBAGENT'])('keeps %s tool calls paired on the compaction surface', async (scenario) => {
+    const warnings: string[] = []
+    const ctx = await setup(
+      { MOCK_TEXT: 'answer', [scenario]: '1' },
+      { server: { command: process.execPath, args: [authMockServer] }, warnSink: warnings },
+    )
+    try {
+      const session = Session.create(SessionId('acp-compaction'))
+      const message = createUserMessage({ content: [{ type: 'text', text: 'hi' }], source: { kind: 'user' } })
+      session.append('turn/start', { turn: 1 })
+      session.append('user/message', message, { surfaceOp: 'append' })
+      session.append('step/start', { turn: 1, step: 1 })
+      const agent = { session } as Agent
+      const chunks = await ctx.agents.withInitiator(agent, () => collect(ctx.llm.stream({
+        provider: 'acp-test',
+        model: 'any',
+        messages: [message],
+      })))
+      expect(finishChunk(chunks).reason.kind).toBe('stop')
+      expect(warnings).toEqual([])
+      const assembler = new BlockAssembler()
+      for (const chunk of chunks) assembler.push(chunk)
+      expect(assembler.blocks().some(block => block.type === 'tool-call')).toBe(false)
+      expect(toolPairingBalancedAfter(session, session.surface.nodes.at(-1)!)).toBe(true)
+
+      const events = session.snapshotEvents()
+      const calls = events.filter(event => event.type === 'tool/call')
+      const messages = events.filter(event => event.type === 'assistant/message')
+      expect(messages).toHaveLength(calls.length)
+      expect(calls.length).toBeGreaterThan(0)
+      for (const call of calls) {
+        const entry = messages.find(event => event.data.message.content.some(block => block.type === 'tool-call' && block.id === call.data.callId))!
+        expect(entry.data.message.source).toEqual({ kind: 'model', provider: 'acp-test', model: 'any' })
+        expect(entry.data.message.content).toEqual([{
+          type: 'tool-call', id: call.data.callId, name: call.data.name, arguments: call.data.arguments,
+        }])
+        expect(entry.seq).toBeLessThan(call.seq)
+        expect(toolPairingBalancedAfter(session, entry.seq)).toBe(false)
+      }
+      for (const result of events.filter(event => event.type === 'tool/result')) {
+        expect(toolPairingBalancedBefore(session, result.seq)).toBe(false)
+      }
+      session.append('step/end', { turn: 1, step: 1 })
+      session.append('turn/end', { turn: 1, reason: { kind: 'completed' } })
+      const restored = Session.create(session.id, session.snapshotEvents())
+      expect(toolPairingBalancedAfter(restored, restored.surface.nodes.at(-1)!)).toBe(true)
     } finally {
       await ctx.fiber.dispose()
     }

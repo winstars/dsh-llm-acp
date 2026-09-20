@@ -143,7 +143,7 @@ export interface AcpAdapterOptions {
      * probes, auxiliary purposes), in which case tool activity falls back to
      * `[tool: …]` reasoning notes.
      */
-    toolCallRecorder?: (() => AcpToolCallRecorder | undefined) | undefined;
+    toolCallRecorder?: ((options: GenerateOptions) => AcpToolCallRecorder | undefined) | undefined;
     /** Host sink for best-effort operation failures (session mode, etc.). */
     onWarn?: (message: string) => void;
     /**
