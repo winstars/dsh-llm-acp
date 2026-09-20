@@ -116,6 +116,12 @@ export const DEFAULT_AUTH_TIMEOUT_MS = 15_000
  * call retries. */
 export const DEFAULT_INTERACTIVE_AUTH_TIMEOUT_MS = 300_000
 
+/** One Harness task-list item derived from an ACP plan entry. */
+export interface AcpPlanItem {
+  content: string
+  status: 'pending' | 'in_progress' | 'completed'
+}
+
 /** One queued update delivered to a {@link AcpConnection.promptStream} consumer. */
 type QueuedUpdate =
   | { kind: 'text'; text: string }
@@ -125,14 +131,25 @@ type QueuedUpdate =
    * A tool call the ACP server started: `id` correlates with a later
    * `tool-end`, `name` is the server-provided display title, `args` is the
    * serialized `rawInput` (`{}` when the server sent none), `subagent` marks a
-   * call made inside a subagent, and `toolKind` is the ACP tool kind
-   * (read/edit/execute/…) — `''` when the server omitted it. The host maps
-   * `toolKind` onto a native harness tool name so the call renders with the
-   * matching row family instead of the generic one.
+   * call made inside a subagent, `toolKind` is the ACP tool kind
+   * (read/edit/execute/…) — `''` when the server omitted it — and
+   * `inferenceToolName` is Devin's `_meta` tool identity when present. The
+   * host maps those identities onto a native harness tool name so the call
+   * renders with the matching row family instead of the generic one.
    */
-  | { kind: 'tool'; id: string; name: string; args: string; subagent: boolean; toolKind: string }
+  | {
+      kind: 'tool'
+      id: string
+      name: string
+      args: string
+      subagent: boolean
+      toolKind: string
+      inferenceToolName: string
+    }
   /** A tool call reached a terminal status (`completed`/`failed`). */
   | { kind: 'tool-end'; id: string; status: 'completed' | 'failed'; output: string }
+  /** A complete replacement for the ACP session's current plan. */
+  | { kind: 'plan'; todos: AcpPlanItem[] }
   /** Agent-side event the caller chose to surface (see `AcpSubagentNotice`). */
   | { kind: 'notice'; text: string }
   | { kind: 'usage'; used: number }
@@ -339,6 +356,45 @@ function stringField(value: unknown, key: string): string | undefined {
   if (typeof value !== 'object' || value === null) return undefined
   const field = Reflect.get(value, key)
   return typeof field === 'string' && field.length > 0 ? field : undefined
+}
+
+const ACP_PLAN_STATUSES = new Set<AcpPlanItem['status']>(['pending', 'in_progress', 'completed'])
+
+/** Whether an unstable `plan_update` carries a structured item snapshot. */
+function acpPlanUpdateIsItems(update: SessionNotification['update']): boolean {
+  if (update.sessionUpdate !== 'plan_update') return false
+  const plan = (update as { plan?: { type?: unknown } }).plan
+  return typeof plan === 'object' && plan !== null && plan.type === 'items'
+}
+
+/**
+ * Normalize one item-based ACP plan into Harness todo rows. ACP sends a
+ * complete entry list on each update; malformed entries invalidate the whole
+ * snapshot, while duplicate content is collapsed because `todo/write` uses
+ * content as its identity.
+ */
+function acpPlanItems(update: SessionNotification['update']): AcpPlanItem[] | undefined {
+  if (update.sessionUpdate === 'plan_removed') return []
+  const plan = acpPlanUpdateIsItems(update)
+    ? (update as { plan?: { entries?: unknown } }).plan
+    : undefined
+  const entries = update.sessionUpdate === 'plan' ? update.entries : plan?.entries
+  if (!Array.isArray(entries)) return undefined
+  const seen = new Set<string>()
+  const todos: AcpPlanItem[] = []
+  for (const entry of entries) {
+    if (typeof entry !== 'object' || entry === null) return undefined
+    const content = stringField(entry, 'content')?.trim()
+    const status = Reflect.get(entry, 'status')
+    if (content === undefined || content.length === 0
+      || typeof status !== 'string' || !ACP_PLAN_STATUSES.has(status as AcpPlanItem['status'])) {
+      return undefined
+    }
+    if (seen.has(content)) continue
+    seen.add(content)
+    todos.push({ content, status: status as AcpPlanItem['status'] })
+  }
+  return todos
 }
 
 /**
@@ -1115,6 +1171,8 @@ export class AcpConnection {
         || update.sessionUpdate === 'agent_thought_chunk'
         || update.sessionUpdate === 'tool_call'
         || update.sessionUpdate === 'plan'
+        || update.sessionUpdate === 'plan_update'
+        || update.sessionUpdate === 'plan_removed'
       this.traceEvent('recv', 'session/update-dropped', `${update.sessionUpdate} sessionId=${params.sessionId}`,
         contentDrop ? `drop:${update.sessionUpdate}:${params.sessionId}` : `drop:${update.sessionUpdate}`, params)
       // A session/load replay floods this path by design (the agent streams
@@ -1158,6 +1216,7 @@ export class AcpConnection {
           args: update.rawInput === undefined || update.rawInput === null ? '{}' : tryStringify(update.rawInput),
           subagent: parent !== undefined,
           toolKind: typeof update.kind === 'string' ? update.kind : '',
+          inferenceToolName: stringField(update._meta, ACP_INFERENCE_TOOL_META) ?? '',
         })
         // A server may publish a call already finished; pair the end now so
         // consumers never see a call that stays open.
@@ -1181,8 +1240,15 @@ export class AcpConnection {
       if (update.status === 'completed' || update.status === 'failed') {
         entry.queue.push({ kind: 'tool-end', id: update.toolCallId, status: update.status, output: acpToolOutput(update) })
       }
-    } else if (update.sessionUpdate === 'plan') {
-      // Plan updates are consumed but not surfaced.
+    } else if (update.sessionUpdate === 'plan'
+      || update.sessionUpdate === 'plan_update'
+      || update.sessionUpdate === 'plan_removed') {
+      const todos = acpPlanItems(update)
+      if (todos !== undefined) {
+        entry.queue.push({ kind: 'plan', todos })
+      } else if (update.sessionUpdate !== 'plan_update' || acpPlanUpdateIsItems(update)) {
+        this.spec.onWarn?.(`llm-acp: dropped malformed ACP ${update.sessionUpdate} for session ${params.sessionId}`)
+      }
     } else if (update.sessionUpdate === 'user_message_chunk') {
       // Echo of user input; consumed silently.
     }

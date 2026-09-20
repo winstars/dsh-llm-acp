@@ -33,6 +33,11 @@ export declare const DEFAULT_AUTH_TIMEOUT_MS = 15000;
  * enough for the user to finish a browser login before the failed session
  * call retries. */
 export declare const DEFAULT_INTERACTIVE_AUTH_TIMEOUT_MS = 300000;
+/** One Harness task-list item derived from an ACP plan entry. */
+export interface AcpPlanItem {
+    content: string;
+    status: 'pending' | 'in_progress' | 'completed';
+}
 /** One queued update delivered to a {@link AcpConnection.promptStream} consumer. */
 type QueuedUpdate = {
     kind: 'text';
@@ -48,10 +53,11 @@ type QueuedUpdate = {
  * A tool call the ACP server started: `id` correlates with a later
  * `tool-end`, `name` is the server-provided display title, `args` is the
  * serialized `rawInput` (`{}` when the server sent none), `subagent` marks a
- * call made inside a subagent, and `toolKind` is the ACP tool kind
- * (read/edit/execute/…) — `''` when the server omitted it. The host maps
- * `toolKind` onto a native harness tool name so the call renders with the
- * matching row family instead of the generic one.
+ * call made inside a subagent, `toolKind` is the ACP tool kind
+ * (read/edit/execute/…) — `''` when the server omitted it — and
+ * `inferenceToolName` is Devin's `_meta` tool identity when present. The
+ * host maps those identities onto a native harness tool name so the call
+ * renders with the matching row family instead of the generic one.
  */
  | {
     kind: 'tool';
@@ -60,6 +66,7 @@ type QueuedUpdate = {
     args: string;
     subagent: boolean;
     toolKind: string;
+    inferenceToolName: string;
 }
 /** A tool call reached a terminal status (`completed`/`failed`). */
  | {
@@ -67,6 +74,11 @@ type QueuedUpdate = {
     id: string;
     status: 'completed' | 'failed';
     output: string;
+}
+/** A complete replacement for the ACP session's current plan. */
+ | {
+    kind: 'plan';
+    todos: AcpPlanItem[];
 }
 /** Agent-side event the caller chose to surface (see `AcpSubagentNotice`). */
  | {

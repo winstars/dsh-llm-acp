@@ -24,20 +24,22 @@ import { LlmAdapter } from '@deepseek-ai/dsh-llm';
 import type { GenerateOptions, LlmModelInfo, LlmProviderInfo, LlmResolvedModelInfo, PreparedAdapterCall, StreamChunk } from '@deepseek-ai/dsh-llm';
 import type { Message } from '@deepseek-ai/dsh-llm';
 import { AcpConnection } from './connection.ts';
-import type { AcpPermissionRequester, AcpSubagentNotice } from './connection.ts';
+import type { AcpPermissionRequester, AcpPlanItem, AcpSubagentNotice } from './connection.ts';
 /**
- * Records ACP-observed tool activity into the calling session's durable log
- * (`tool/call` on start, `tool/result` on terminal status). Implementations
- * are host-owned: the adapter never sees the session itself, it only reports
- * what the wire carried. A call that never reaches {@link callFinished} is
- * closed by the adapter at stream end with `output: ''`.
+ * Records ACP-observed tool and plan activity into the calling session's
+ * durable log (`tool/call` on start, `tool/result` on terminal status, and
+ * `todo/write` for plan snapshots). Implementations are host-owned: the
+ * adapter never sees the session itself, it only reports what the wire
+ * carried. A call that never reaches {@link callFinished} is closed by the
+ * adapter at stream end with `output: ''`.
  */
 export interface AcpToolCallRecorder {
     /**
      * One tool call began on the ACP side. `subagent` marks a call made inside
      * a subagent; `toolKind` is the ACP tool kind (`read`/`edit`/`execute`/…),
-     * `''` when the server omitted it — the host maps it onto a native tool
-     * name so the call renders with the matching row family.
+     * `''` when the server omitted it, and `inferenceToolName` is Devin's
+     * `_meta` tool identity when present — the host maps those identities onto
+     * a native tool name so the call renders with the matching row family.
      */
     callStarted(call: {
         id: string;
@@ -45,6 +47,7 @@ export interface AcpToolCallRecorder {
         args: string;
         subagent: boolean;
         toolKind: string;
+        inferenceToolName: string;
     }): void;
     /** A previously started call reached a terminal status. */
     callFinished(result: {
@@ -52,6 +55,11 @@ export interface AcpToolCallRecorder {
         output: string;
         isError: boolean;
     }): void;
+    /**
+     * A complete ACP plan snapshot arrived. `todos` is the normalized whole
+     * list the host should write over its task list; an empty list clears it.
+     */
+    planUpdated?(todos: readonly AcpPlanItem[]): void;
 }
 /** Constructor options for {@link AcpAdapter}. */
 export interface AcpAdapterOptions {

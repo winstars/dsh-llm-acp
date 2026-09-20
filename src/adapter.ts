@@ -28,26 +28,40 @@ import type { Message } from '@deepseek-ai/dsh-llm'
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { dirname } from 'node:path'
 import { AcpConnection } from './connection.ts'
-import type { AcpPermissionRequester, AcpSubagentNotice } from './connection.ts'
+import type { AcpPermissionRequester, AcpPlanItem, AcpSubagentNotice } from './connection.ts'
 import { acpFinishReason } from './types.ts'
 
 /**
- * Records ACP-observed tool activity into the calling session's durable log
- * (`tool/call` on start, `tool/result` on terminal status). Implementations
- * are host-owned: the adapter never sees the session itself, it only reports
- * what the wire carried. A call that never reaches {@link callFinished} is
- * closed by the adapter at stream end with `output: ''`.
+ * Records ACP-observed tool and plan activity into the calling session's
+ * durable log (`tool/call` on start, `tool/result` on terminal status, and
+ * `todo/write` for plan snapshots). Implementations are host-owned: the
+ * adapter never sees the session itself, it only reports what the wire
+ * carried. A call that never reaches {@link callFinished} is closed by the
+ * adapter at stream end with `output: ''`.
  */
 export interface AcpToolCallRecorder {
   /**
    * One tool call began on the ACP side. `subagent` marks a call made inside
    * a subagent; `toolKind` is the ACP tool kind (`read`/`edit`/`execute`/…),
-   * `''` when the server omitted it — the host maps it onto a native tool
-   * name so the call renders with the matching row family.
+   * `''` when the server omitted it, and `inferenceToolName` is Devin's
+   * `_meta` tool identity when present — the host maps those identities onto
+   * a native tool name so the call renders with the matching row family.
    */
-  callStarted(call: { id: string; name: string; args: string; subagent: boolean; toolKind: string }): void
+  callStarted(call: {
+    id: string
+    name: string
+    args: string
+    subagent: boolean
+    toolKind: string
+    inferenceToolName: string
+  }): void
   /** A previously started call reached a terminal status. */
   callFinished(result: { id: string; output: string; isError: boolean }): void
+  /**
+   * A complete ACP plan snapshot arrived. `todos` is the normalized whole
+   * list the host should write over its task list; an empty list clears it.
+   */
+  planUpdated?(todos: readonly AcpPlanItem[]): void
 }
 
 /** Constructor options for {@link AcpAdapter}. */
@@ -723,7 +737,14 @@ export class AcpAdapter extends LlmAdapter {
             // is it doing", and unlike `progress` (extension log text such as
             // MCP server chatter) it is low-volume and structured.
             if (toolCallRecorder !== undefined) {
-              toolCallRecorder.callStarted({ id: update.id, name: update.name, args: update.args, subagent: update.subagent, toolKind: update.toolKind })
+              toolCallRecorder.callStarted({
+                id: update.id,
+                name: update.name,
+                args: update.args,
+                subagent: update.subagent,
+                toolKind: update.toolKind,
+                inferenceToolName: update.inferenceToolName,
+              })
               pendingToolCalls.add(update.id)
             } else if (this.config.emitToolCalls !== false) {
               if (open === undefined || open.type !== 'reasoning') {
@@ -744,6 +765,13 @@ export class AcpAdapter extends LlmAdapter {
             if (pendingToolCalls.delete(update.id)) {
               toolCallRecorder?.callFinished({ id: update.id, output: update.output, isError: update.status === 'failed' })
             }
+            break
+          }
+          case 'plan': {
+            // The ACP agent's plan is the session's task list. The recorder
+            // writes the whole snapshot as `todo/write`; without a recorder
+            // (probes, auxiliary calls) there is no task list to update.
+            toolCallRecorder?.planUpdated?.(update.todos)
             break
           }
           case 'notice': {

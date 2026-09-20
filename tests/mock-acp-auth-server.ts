@@ -51,8 +51,16 @@
  *   one call that completes with text output after an `in_progress` beat, one
  *   that fails, one left pending when the prompt ends — exercising the
  *   client's start/end pairing and its flush of calls that never report a
- *   terminal status — and one bare call with neither `rawInput` nor `kind`
- *   that arrives already completed.
+ *   terminal status — one bare call with neither `rawInput` nor `kind`
+ *   that arrives already completed, and one shell call identified only by
+ *   Devin's `_meta.inferenceToolName` (no ACP `kind`).
+ * - `MOCK_PLAN` — if `1`, `session/prompt` emits a complete `plan`, then a
+ *   `plan_update` item snapshot, then `plan_removed`, exercising the whole
+ *   task-list lifecycle. With `MOCK_PLAN_KEEP=1` it stops before removal, so
+ *   the updated list stays visible.
+ * - `MOCK_PLAN_KEEP` — with `MOCK_PLAN`, skip the final `plan_removed`.
+ * - `MOCK_BAD_PLAN` — if `1`, `session/prompt` emits one malformed `plan`
+ *   (an empty content and an unknown status) before streaming its text.
  * - `MOCK_TEXT` — the assistant text streamed as one `agent_message_chunk`.
  *
  * @module @deepseek-ai/dsh-llm-acp/tests/mock-acp-auth-server
@@ -86,6 +94,9 @@ const USAGE_SIZE = process.env.MOCK_USAGE_SIZE
 const USAGE_ON_SESSION = process.env.MOCK_USAGE_ON_SESSION === '1'
 const SUBAGENT = process.env.MOCK_SUBAGENT === '1'
 const TOOLS = process.env.MOCK_TOOLS === '1'
+const PLAN = process.env.MOCK_PLAN === '1'
+const PLAN_KEEP = process.env.MOCK_PLAN_KEEP === '1'
+const BAD_PLAN = process.env.MOCK_BAD_PLAN === '1'
 
 /** The agent id a replayed subagent reports as its parent. */
 const SUBAGENT_AGENT_ID = '08102184'
@@ -231,6 +242,69 @@ async function emitToolTraffic(
     title: 'Bare probe',
     status: 'completed',
   })
+  // A shell call Devin identifies only through `_meta`: no ACP `kind`, so the
+  // client must use the inference-tool identity to reach the bash row family.
+  await update({
+    sessionUpdate: 'tool_call',
+    toolCallId: 'tool-command',
+    title: 'Bash · cd /tmp && go build ./...',
+    rawInput: { command: 'cd /tmp && go build ./...' },
+    status: 'completed',
+    _meta: { 'cognition.ai/inferenceToolName': 'exec' },
+  })
+}
+
+/**
+ * Replay the whole plan lifecycle: a complete `plan`, a `plan_update` item
+ * snapshot, then removal. Each is a whole-list snapshot to the client.
+ */
+async function emitPlanTraffic(
+  conn: AgentSideConnection,
+  sessionId: string,
+): Promise<void> {
+  const update = (u: unknown): Promise<void> =>
+    conn.sessionUpdate({ sessionId, update: u as never })
+
+  await update({
+    sessionUpdate: 'plan',
+    entries: [
+      { content: 'Inspect the ACP plan payload', priority: 'high', status: 'completed' },
+      { content: 'Map the plan to the task list', priority: 'medium', status: 'in_progress' },
+      { content: 'Verify the projection', priority: 'low', status: 'pending' },
+    ],
+  })
+  await update({
+    sessionUpdate: 'plan_update',
+    plan: {
+      type: 'items',
+      id: 'plan-1',
+      entries: [
+        { content: 'Map the plan to the task list', priority: 'high', status: 'completed' },
+        { content: 'Verify the projection', priority: 'low', status: 'in_progress' },
+      ],
+    },
+  })
+  if (!PLAN_KEEP) await update({ sessionUpdate: 'plan_removed', id: 'plan-1' })
+}
+
+/**
+ * Emit one malformed plan: an empty content and an unknown status. The client
+ * must drop the whole snapshot rather than write a partial task list.
+ */
+async function emitBadPlanTraffic(
+  conn: AgentSideConnection,
+  sessionId: string,
+): Promise<void> {
+  await conn.sessionUpdate({
+    sessionId,
+    update: {
+      sessionUpdate: 'plan',
+      entries: [
+        { content: '', priority: 'high', status: 'pending' },
+        { content: 'Valid entry', priority: 'low', status: 'not-a-status' },
+      ],
+    } as never,
+  })
 }
 
 /**
@@ -342,6 +416,8 @@ if (SILENT) {
       }
       if (SUBAGENT) await emitSubagentTraffic(connRef!, params.sessionId)
       if (TOOLS) await emitToolTraffic(connRef!, params.sessionId)
+      if (PLAN) await emitPlanTraffic(connRef!, params.sessionId)
+      if (BAD_PLAN) await emitBadPlanTraffic(connRef!, params.sessionId)
       const sample = prompts++
       const used = scriptedNumber(USAGE_USED, sample)
       if (used !== undefined) {

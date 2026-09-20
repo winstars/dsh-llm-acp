@@ -34,6 +34,7 @@ import {
   DEFAULT_INTERACTIVE_AUTH_TIMEOUT_MS,
   DEFAULT_SESSION_TIMEOUT_MS,
 } from './connection.ts'
+import type { AcpPlanItem } from './connection.ts'
 import registryData from './registry.json' with { type: 'json' }
 
 export { AcpAdapter } from './adapter.ts'
@@ -47,7 +48,7 @@ export {
   DEFAULT_INTERACTIVE_AUTH_TIMEOUT_MS,
   DEFAULT_SESSION_TIMEOUT_MS,
 } from './connection.ts'
-export type { AcpConnectionSpec, ProtocolTraceEntry } from './connection.ts'
+export type { AcpConnectionSpec, AcpPlanItem, ProtocolTraceEntry } from './connection.ts'
 export type * from './types.ts'
 export { registryData as acpRegistry }
 
@@ -398,22 +399,62 @@ function auditAutoAllowedPermission(session: Session, serverName: string, title:
 }
 
 /**
- * ACP tool kind → native harness tool name, so the call renders with the
- * matching row family (icon, localized title, openable file path) instead of
- * the generic one. Kinds without a native equivalent keep the server-provided
- * title. Targets are names the harness client's `TOOL_VARIANTS` classifies.
+ * ACP tool identities → native harness tool names, so the call renders with
+ * the matching row family (icon, localized title, openable file path) instead
+ * of the generic one. Identities are the ACP `tool_call.kind` plus Devin's
+ * `_meta.inferenceToolName`; names without a native equivalent keep the
+ * server-provided title. Targets are names the harness client's
+ * `TOOL_VARIANTS` classifies.
  */
-const ACP_TOOL_KIND_NAMES: Record<string, string> = {
+const ACP_TOOL_NAMES: Record<string, string> = {
   read: 'read',
   edit: 'edit',
+  write: 'write',
   execute: 'bash',
+  exec: 'bash',
   search: 'grep',
   fetch: 'web_fetch',
+  web_fetch: 'web_fetch',
+  web_search: 'web_search',
+  grep: 'grep',
+  glob: 'glob',
+  run_code: 'run_code',
 }
 
-/** Native row-family name for a recorded call, per its ACP tool kind. */
-function acpToolName(call: { name: string; toolKind: string }): string {
-  return ACP_TOOL_KIND_NAMES[call.toolKind] ?? call.name
+/** Native row-family name for a recorded call, per its ACP tool kind or `_meta` identity. */
+function acpToolName(call: { name: string; toolKind: string; inferenceToolName: string }): string {
+  return ACP_TOOL_NAMES[call.toolKind] ?? ACP_TOOL_NAMES[call.inferenceToolName] ?? call.name
+}
+
+/**
+ * Arguments for a recorded call. An ACP shell call carries only `command`
+ * while the native bash row treats a `description`-less call as a persistent
+ * shell (whose settled result stays generic), so a missing description is
+ * filled from the command's first line — the same text the row would
+ * otherwise show as its summary.
+ */
+function acpToolArguments(name: string, argsRaw: string): string {
+  if (name !== 'bash' || argsRaw === '') return argsRaw
+  let parsed: unknown
+  try {
+    parsed = JSON.parse(argsRaw)
+  } catch {
+    return argsRaw
+  }
+  if (typeof parsed !== 'object' || parsed === null) return argsRaw
+  const args = parsed as Record<string, unknown>
+  if (typeof args.command !== 'string' || args.command.trim() === '' || args.description !== undefined) return argsRaw
+  return JSON.stringify({ ...args, description: args.command.split('\n')[0] })
+}
+
+/**
+ * Narrow append face for the `todo/write` event owned by `dsh-tool-todo`.
+ * The plugin does not depend on that package's types; the event is only
+ * meaningful when its projection is mounted, and `Session.append` accepts
+ * merge-extensible event names at runtime.
+ */
+interface TodoWriteSession {
+  append(type: 'todo/write', data: { todos: AcpPlanItem[] }): unknown
 }
 
 /**
@@ -426,12 +467,16 @@ function acpToolName(call: { name: string; toolKind: string }): string {
  * Returns `undefined` outside one (test probes, auxiliary calls), leaving the
  * adapter's `[tool: …]` reasoning fallback.
  *
+ * A complete ACP plan snapshot is written as `todo/write` on the same open
+ * step, so the harness task panel renders the remote agent's plan.
+ *
  * The calls already ran inside the ACP server; these events are the durable
  * record of that remote execution, not a dispatch request — they are never
  * emitted as `tool-call` stream blocks, which the agent loop would hand to
  * the harness's own tool registry and execute a second time.
  *
  * @param session - the calling agent's session.
+ * @param source - provider/model provenance for synthetic assistant messages.
  * @param onWarn - sink for append failures; a failed append disables the
  *   recorder for the rest of the stream rather than failing the turn over a
  *   presentational record.
@@ -465,7 +510,13 @@ function acpToolCallRecorder(session: Session, source: AssistantProvenance, onWa
   return {
     callStarted(call) {
       guard('tool/call', () => {
-        const block = { type: 'tool-call' as const, id: ToolCallId(call.id), name: acpToolName(call), arguments: call.args }
+        const name = acpToolName(call)
+        const block = {
+          type: 'tool-call' as const,
+          id: ToolCallId(call.id),
+          name,
+          arguments: acpToolArguments(name, call.args),
+        }
         const data = {
           turn,
           step,
@@ -504,6 +555,11 @@ function acpToolCallRecorder(session: Session, source: AssistantProvenance, onWa
           message,
           ...(result.isError ? { error: { name: 'AcpToolError', code: 'ACP_TOOL_FAILED' } } : {}),
         }, { surfaceOp: 'append', sourceEventSeqs: [callSeq] })
+      })
+    },
+    planUpdated(todos) {
+      guard('todo/write', () => {
+        (session as Session & TodoWriteSession).append('todo/write', { todos: [...todos] })
       })
     },
   }

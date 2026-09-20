@@ -1170,8 +1170,9 @@ describe('dsh-llm-acp', () => {
       const calls = events.filter(e => e.type === 'tool/call')
       const results = events.filter(e => e.type === 'tool/result')
       // Names are the native row-family names the host maps each ACP tool
-      // kind onto; a call with no kind keeps the server-provided title.
-      expect(calls.map(c => (c.data as { name: string }).name)).toEqual(['read', 'bash', 'bash', 'Bare probe'])
+      // identity onto; a call with neither kind nor `_meta` keeps the
+      // server-provided title.
+      expect(calls.map(c => (c.data as { name: string }).name)).toEqual(['read', 'bash', 'bash', 'Bare probe', 'bash'])
       for (const call of calls) {
         expect(call.data).toMatchObject({ turn: 1, step: 1 })
       }
@@ -1179,10 +1180,17 @@ describe('dsh-llm-acp', () => {
       // A call with no rawInput records `{}`, not the empty string whose
       // rendering falls back to the opaque callId.
       expect((calls[3]!.data as { arguments: string }).arguments).toBe('{}')
+      // A shell call identified only by `_meta.inferenceToolName` still reaches
+      // the bash row family, and its missing native `description` is filled so
+      // the settled result renders as a terminal card rather than generic JSON.
+      expect((calls[4]!.data as { arguments: string }).arguments).toBe(JSON.stringify({
+        command: 'cd /tmp && go build ./...',
+        description: 'cd /tmp && go build ./...',
+      }))
       // Every started call gets a result: the completed ones from their
       // terminal updates, the failed one with an error identity, and the
       // pending one flushed as a non-error empty result when the prompt ended.
-      expect(results).toHaveLength(4)
+      expect(results).toHaveLength(5)
       for (const result of results) {
         const callId = (result.data as { message: { source: { callId: string } } }).message.source.callId
         const callSeq = calls.find(c => (c.data as { callId: string }).callId === callId)!.seq
@@ -1207,6 +1215,60 @@ describe('dsh-llm-acp', () => {
       const pending = resultBlock('tool-pending')
       expect(pending.message.content[0]!.isError).toBe(false)
       expect(pending.message.content[0]!.content).toEqual([])
+    } finally {
+      await ctx.fiber.dispose()
+    }
+  })
+
+  it('writes ACP plan snapshots as whole-list todo/write events', async () => {
+    const ctx = await setup(
+      { MOCK_TEXT: 'answer', MOCK_PLAN: '1' },
+      { server: { command: process.execPath, args: [authMockServer] } },
+    )
+    try {
+      const agent = fakeAgent([{ type: 'step/start', data: { turn: 1, step: 1 } }])
+      const chunks = await ctx.agents.withInitiator(agent, () => collect(ctx.llm.stream({
+        provider: 'acp-test',
+        model: 'any',
+        messages: [createUserMessage({ content: [{ type: 'text', text: 'hi' }], source: { kind: 'user' } })],
+      })))
+      expect(finishChunk(chunks).reason.kind).toBe('stop')
+      const events = (agent.session as unknown as { events: Array<Record<string, unknown>> }).events
+      const writes = events.filter(e => e.type === 'todo/write')
+      // Each ACP plan notification is a complete snapshot, so each becomes one
+      // whole-list write — including `plan_removed`, which clears the list.
+      expect(writes).toHaveLength(3)
+      expect((writes[0] as { data: { todos: unknown[] } }).data.todos).toEqual([
+        { content: 'Inspect the ACP plan payload', status: 'completed' },
+        { content: 'Map the plan to the task list', status: 'in_progress' },
+        { content: 'Verify the projection', status: 'pending' },
+      ])
+      expect((writes[1] as { data: { todos: unknown[] } }).data.todos).toEqual([
+        { content: 'Map the plan to the task list', status: 'completed' },
+        { content: 'Verify the projection', status: 'in_progress' },
+      ])
+      expect((writes[2] as { data: { todos: unknown[] } }).data.todos).toEqual([])
+    } finally {
+      await ctx.fiber.dispose()
+    }
+  })
+
+  it('drops a malformed ACP plan without writing a partial task list', async () => {
+    const warnings: string[] = []
+    const ctx = await setup(
+      { MOCK_TEXT: 'answer', MOCK_BAD_PLAN: '1' },
+      { server: { command: process.execPath, args: [authMockServer] }, warnSink: warnings },
+    )
+    try {
+      const agent = fakeAgent([{ type: 'step/start', data: { turn: 1, step: 1 } }])
+      await ctx.agents.withInitiator(agent, () => collect(ctx.llm.stream({
+        provider: 'acp-test',
+        model: 'any',
+        messages: [createUserMessage({ content: [{ type: 'text', text: 'hi' }], source: { kind: 'user' } })],
+      })))
+      expect(warnings.some(w => w.includes('dropped malformed ACP plan'))).toBe(true)
+      const events = (agent.session as unknown as { events: Array<Record<string, unknown>> }).events
+      expect(events.filter(e => e.type === 'todo/write')).toHaveLength(0)
     } finally {
       await ctx.fiber.dispose()
     }
