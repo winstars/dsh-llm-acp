@@ -7,22 +7,15 @@ import { clientBundle } from './scripts/tsdown.client.ts'
  * `lib/types/` (tsc output); the client entry is built from source by the
  * shared `clientBundle` preset.
  */
-const client = clientBundle('@deepseek-ai/dsh-llm-acp', ['lib/types/index.js', 'lib/types/invariant.js'])
+const client = clientBundle('@deepseek-ai/dsh-llm-acp', ['lib/types/index.js'])
 
-/** Host node entries (index + invariant). */
+/** Host node entry (index). The 0.2.0-era invariant companion is gone: dsh
+ * 0.2.1 removed the invariants seam (`@deepseek-ai/dsh-invariants` has no
+ * 0.2.1 release and `packages/llm/llm/src/invariant.ts` no longer exists
+ * upstream), and the companion was an empty no-op, so nothing registers it. */
 const hostConfigs: UserConfig[] = [
   {
     entry: ['lib/types/index.js'],
-    outDir: 'lib',
-    format: ['esm'],
-    platform: 'node',
-    target: 'es2024',
-    fixedExtension: false,
-    dts: false,
-    clean: false,
-  },
-  {
-    entry: ['lib/types/invariant.js'],
     outDir: 'lib',
     format: ['esm'],
     platform: 'node',

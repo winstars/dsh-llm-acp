@@ -337,6 +337,31 @@ describe('dsh-llm-acp', () => {
     }
   })
 
+  it('emits a single usage chunk carrying the newest sample when the server re-samples mid-turn', async () => {
+    // The harness llm invariant allows at most one `usage` chunk per stream,
+    // but a server may send several `usage_update`s in one turn. The adapter
+    // must keep only the newest sample and emit it once, immediately before
+    // the terminal finish — never one chunk per update.
+    const ctx = await setup(
+      { MOCK_TEXT: 'answer', MOCK_USAGE_USED: '64000', MOCK_USAGE_EXTRA: '65000', MOCK_USAGE_SIZE: '200000' },
+      { server: { command: process.execPath, args: [authMockServer] } },
+    )
+    try {
+      const chunks = await collect(ctx.llm.stream({
+        provider: 'acp-test',
+        model: 'any',
+        messages: [createUserMessage({ content: [{ type: 'text', text: 'hi' }], source: { kind: 'user' } })],
+      }))
+      expect(chunks.filter(c => c.type === 'usage')).toEqual([
+        { type: 'usage', usage: { inputTokens: 65_000, outputTokens: 0 } },
+      ])
+      expect(chunks.findIndex(c => c.type === 'usage'))
+        .toBeLessThan(chunks.findIndex(c => c.type === 'finish'))
+    } finally {
+      await ctx.fiber.dispose()
+    }
+  })
+
   it('reports occupancy without a model capacity when the server publishes no window', async () => {
     const ctx = await setup(
       { MOCK_TEXT: 'answer', MOCK_USAGE_USED: '512' },

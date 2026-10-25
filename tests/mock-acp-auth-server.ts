@@ -40,6 +40,10 @@
  * - `MOCK_USAGE_ON_SESSION` — if `1`, announce the first scripted usage sample
  *   from `session/new` itself, i.e. before any prompt, as a server that knows
  *   its occupancy at session setup does.
+ * - `MOCK_USAGE_EXTRA` — if set, `session/prompt` emits a second
+ *   `usage_update` with this many tokens right after the `MOCK_USAGE_USED`
+ *   one, standing in for a server that re-samples mid-turn; the adapter must
+ *   still emit a single `usage` chunk carrying this newest value.
  * - `MOCK_SUBAGENT` — if `1`, `session/prompt` replays the subagent traffic a
  *   real Devin session produces, in the order it produced it: an ordinary
  *   `exec` call, a `run_subagent` call carrying `profile` in `rawInput` and
@@ -92,6 +96,7 @@ const MODES = process.env.MOCK_MODES === '1'
 const USAGE_USED = process.env.MOCK_USAGE_USED
 const USAGE_SIZE = process.env.MOCK_USAGE_SIZE
 const USAGE_ON_SESSION = process.env.MOCK_USAGE_ON_SESSION === '1'
+const USAGE_EXTRA = process.env.MOCK_USAGE_EXTRA === undefined ? undefined : Number(process.env.MOCK_USAGE_EXTRA)
 const SUBAGENT = process.env.MOCK_SUBAGENT === '1'
 const TOOLS = process.env.MOCK_TOOLS === '1'
 const PLAN = process.env.MOCK_PLAN === '1'
@@ -424,6 +429,12 @@ if (SILENT) {
         await connRef!.sessionUpdate({
           sessionId: params.sessionId,
           update: { sessionUpdate: 'usage_update', used, size: scriptedNumber(USAGE_SIZE, sample) ?? 0 },
+        })
+      }
+      if (USAGE_EXTRA !== undefined) {
+        await connRef!.sessionUpdate({
+          sessionId: params.sessionId,
+          update: { sessionUpdate: 'usage_update', used: USAGE_EXTRA, size: scriptedNumber(USAGE_SIZE, sample) ?? 0 },
         })
       }
       await connRef!.sessionUpdate({

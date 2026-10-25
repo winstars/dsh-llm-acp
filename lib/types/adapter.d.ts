@@ -9,8 +9,11 @@
  * closed after the prompt.
  *
  * `agent_message_chunk` / `agent_thought_chunk` updates are translated into
- * harness `StreamChunk`s; `usage_update` becomes a `usage` chunk carrying the
- * server's context occupancy on the prompt side. Tool calls are never emitted
+ * harness `StreamChunk`s; the newest `usage_update` becomes a single `usage`
+ * chunk carrying the server's context occupancy on the prompt side, emitted
+ * once immediately before the terminal `finish` (the harness invariant
+ * allows at most one `usage` chunk per stream, but a server may send several
+ * `usage_update`s in one turn). Tool calls are never emitted
  * as `tool-call` stream blocks: the agent loop dispatches such blocks to the
  * harness's own tool registry, but the ACP server already executed them — the
  * host would run them twice or fail on an unknown tool. When the caller
