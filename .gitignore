@@ -13,3 +13,10 @@ node_modules/
 .workbuddy/
 .workbuddy/
 .dsh-llm-acp/
+
+# No committed lockfile: DSHA re-resolves prod deps online and digest-checks
+# the plugin tree; a committed lock can never match a fresh --prod
+# resolution, so shipping one fails install with
+# "插件源码在依赖准备期间变化，未进入安装". Local `pnpm install` still
+# generates one for development; it just stays out of the repo.
+pnpm-lock.yaml
